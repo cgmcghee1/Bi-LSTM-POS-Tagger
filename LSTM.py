@@ -1,57 +1,53 @@
 import nltk
 import numpy as np
-import pandas as pd
 from nltk.corpus import treebank
-from Functions import *
 import pickle
-import tensorflow as tf
 from keras.models import Sequential
 from keras.layers import Embedding
-from keras.layers import InputLayer
 from keras.layers import LSTM
 from keras.layers import Bidirectional
 from keras.layers import Dense
 from keras.layers import TimeDistributed
+from keras.utils.np_utils import to_categorical
 from sklearn.model_selection import train_test_split
-
 
 class Model:
 
 
     def __init__(self, corpus = treebank):
 
-        """
+
+        tagged_words = np.asarray(corpus.tagged_words())
+        self.tagset = {tag:num for (num,tag) in enumerate(set(tagged_words[:,1]))}
+        self.indtag = {num:tag for (tag,num) in self.tagset.items()}
+        self.word_index = {word:num for (num, word) in \
+                           enumerate(set(tagged_words[:,0]))}
+        self.word_index['UNK'] = len(self.word_index) + 1
+
+        self.tagged_sents = corpus.tagged_sents()
 
 
-        """
-        self.embedding_dict = pickle.load(open("embeddings.p", "rb"))
-        self.X = []
-        self.y = []
-        self.tagset = {tag:num for (num, tag) in\
-                       enumerate(set([tag for (word,tag) in \
-                                      corpus.tagged_words(tagset = 'universal')]))}
 
-        for sent in corpus.tagged_sents(tagset = 'universal'):
-            if len(sent) >= 100:
-                continue
+
+    def train(self, save = False):
+
+
+
+        self.X = np.zeros(shape=(len(self.tagged_sents), 100))
+        self.y = np.zeros(shape=(len(self.tagged_sents), 100, len(self.tagset)))
+
+        for index,sent in enumerate(self.tagged_sents):
             X_temp = []
             y_temp = []
             for (word,tag) in sent:
-                y_onehot = np.zeros(len(self.tagset))
-                y_onehot[self.tagset[tag]] = 1
-                y_temp.append(y_onehot)
-                if word.lower() in self.embedding_dict:
-                    X_temp.append(self.embedding_dict[word.lower()])
-                else:
-                    X_temp.append(np.random.uniform(-.1,.1,size = (300,)))
+                X_temp.append(self.word_index[word])
+                y_temp.append(self.tagset[tag])
 
-            X_temp, y_temp = pad(X_temp,y_temp,len(self.tagset))
+            X_temp, y_temp = self.pad(X_temp,y_temp)
+            y_temp = to_categorical(y_temp, num_classes = len(self.tagset))
 
-            self.X.append(X_temp)
-            self.y.append(y_temp)
-
-        self.X = np.asarray(self.X).astype(np.float64)
-        self.y = np.asarray(self.y).astype(np.float64)
+            self.X[index,:] = np.asarray(X_temp).astype(np.float32)
+            self.y[index,:,:] = np.asarray(y_temp).astype(np.float32)
 
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split\
             (self.X, self.y, test_size = 0.1, random_state = 42)
@@ -59,25 +55,54 @@ class Model:
         self.X_train, self.X_val, self.y_train, self.y_val = train_test_split\
             (self.X_train, self.y_train, test_size = 0.1, random_state = 42)
 
-    def train(self):
-        model = Sequential()
-        model.add(Bidirectional(LSTM(len(self.tagset),input_shape =(100,300)\
-                                     , return_sequences = True)))
-        model.add(TimeDistributed(Dense(len(self.tagset), activation = 'softmax')))
-        model.compile(loss = 'categorical_crossentropy', optimizer = 'adam',\
+        self.model = Sequential()
+        self.model.add(Embedding(input_dim = len(self.word_index)+1, \
+                            output_dim = 300,input_length = 100, trainable = True))
+        self.model.add(Bidirectional(LSTM(len(self.tagset), return_sequences = True)))
+        self.model.add(TimeDistributed(Dense(len(self.tagset), activation = 'softmax')))
+        self.model.compile(loss = 'categorical_crossentropy', optimizer = 'rmsprop',\
                       metrics =['accuracy'])
 
-        model.fit(self.X_train, self.y_train, batch_size = 128, epochs = 10,\
+        self.model.fit(self.X_train, self.y_train, batch_size = 128, epochs = 10,\
                   validation_data = (self.X_val, self.y_val))
-
-        model.summary()
+        if save == True:
+            pickle.dump(self.model, open("model.p","wb"))
         return None
 
-    def tagger(sentence, self):
+    def tagger(self, sentence):
+        split_sent = nltk.word_tokenize(sentence)
+
+        X = np.zeros(shape = (1,100))
+
+        for index,word in enumerate(reversed(split_sent)):
+            if word in self.word_index:
+                X[0,99-index] = self.word_index[word]
+            else:
+                X[0,99-index] = self.word_index['UNK']
+
+        if hasattr(self, "model"):
+            tagsequence = self.model.predict(X)
+        else:
+            model = pickle.load(open("model.p","rb"))
+            y = model.predict(X)
+
+        tagsequence = []
+
+        for i in y[0,:]:
+            tag_pred = np.argmax(i)
+            tagsequence.append(self.indtag[tag_pred])
+
+        tagsequence = tagsequence[100-len(split_sent):]
 
         return tagsequence
 
 
-a = Model().train()
-b = 5
-
+    def pad(self,X,y):
+        if len(X) < 100:
+            for i in range(100-len(X)):
+                X.insert(0,0)
+                y.insert(0,0)
+        elif len(X) > 100:
+            del(X[100:])
+            del(y[100:])
+        return(X,y)
